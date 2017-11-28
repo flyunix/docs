@@ -1,0 +1,1 @@
+Record daily technical information!
