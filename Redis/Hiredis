@@ -1,0 +1,106 @@
+
+##简介
+Hiredis是Redis数据库的简约C客户端库。它是简约的，因为它只是增加了对协议的最小支持，但是同时它使用了一个高级别的printf-like API，所以对于习惯了printf风格的C编程用户来说，其非常容易使用，而且API中没有明确的绑定 每个Redis命令。
+
+除了支持发送命令和接收回复之外，它还附带了一个与I / O层分离的回复解析器。 为了方便复用，其设计成为一个流解析器，例如可以在更高级别的语言绑定中使用，以实现高效的回复解析。
+
+Hiredis仅支持二进制安全(**binary-safe**)的Redis协议，因此您可以将其与任何Redis版本(> = 1.2.0)配合使用。
+
+该库带有多个API。 有同步API，异步API和答复解析API。
+
+##Synchronous API
+
+要使用SynchronousAPI，只需要引入几个函数调用：
+
+```
+redisContext *redisConnect(const char *ip, int port);
+void *redisCommand(redisContext *c, const char *format, ...);
+void freeReplyObject(void *reply);
+```
+
+###Connecting
+函数redisConnect用于创建所谓的redisContext结构。redisContext是Hiredis持有连接状态的地方。当连接处于错误状态时，redisContext结构的整数err字段不为零。errstr字段将包含一个描述错误的字符串。 有关错误的更多信息可以在Errors部分找到。 尝试使用redisConnect连接到Redis后，应检查err字段以查看建立连接是否成功：
+
+```
+redisContext *c = redisConnect("127.0.0.1", 6379);
+if (c == NULL || c->err) {
+    if (c) {
+        printf("Error: %s\n", c->errstr);
+        // handle error
+    } else {
+        printf("Can't allocate redis context\n");
+    }
+}
+```
+
+**注意:一个redisContext结构是线程非安全的。**
+
+###Sending commands
+有几种方法可以向Redis发出命令。 首先介绍的是redisCommand。 这个函数的格式类似于printf。 最简单的形式是这样使用的：
+
+```
+reply = redisCommand(context, "SET foo bar");
+```
+
+说明符％s在命令中插入一个字符串，并使用strlen来确定字符串的长度：
+```
+reply = redisCommand(context, "SET foo %s", value);
+```
+当您需要在命令中传递二进制安全字符串时，可以使用％b说明符。 与指向字符串的指针一起，它需要字符串的size_t长度参数：
+```
+reply = redisCommand(context, "SET foo %b", value, (size_t) valuelen);
+```
+在内部，Hiredis将命令拆分为不同的参数，并将其转换为与Redis进行通信的协议。 一个或多个空格分隔参数，因此您可以在参数的任何位置使用说明符：
+
+```
+reply = redisCommand(context, "SET key:%s %s", myid, value);
+```
+
+##Using replies
+当命令成功执行时，redisCommand的返回值保留一个回复。 发生错误时，返回值为NULL，上下文中的err字段将被设置（请参阅**Errors**部分）。 **一旦错误返回，上下文不能被重用，你应该建立一个新的连接。**
+
+redisCommand的标准回复类型是redisReply。 应该使用redisReply中的类型字段来测试收到的答复类型：
+
+1. REDIS_REPLY_STATUS:
+	>该命令回复了命令执行状态。 状态字符串可以使用reply-> str来访问。 这个字符串的长度可以使用reply-> len来访问。
+	
+2. REDIS_REPLY_ERROR:
+	>该命令回复了一个错误。 错误字符串可以被访问REDIS_REPLY_STATUS来获得。
+	
+3. REDIS_REPLY_INTEGER:
+	>该命令用一个整数来回答。 可以使用long long类型的reply-> integer字段来访问整数值。
+	
+4. REDIS_REPLY_NIL：
+	>该命令回答了一个无效的对象。 其表示没有数据可以访问。
+	
+5. REDIS_REPLY_STRING:
+	>批量数据（字符串）回复。 答复的值可以使用reply-> str来访问。 这个字符串的长度可以使用reply-> len来访问。
+    
+6. REDIS_REPLY_ARRAY:
+	>多批量数据回复。 多批量数据回复中的元素数量存储在reply->元素中。 多批量回复中的每个元素也是一个redisReply对象，可以通过reply-> element [.. index ..]进行访问。 Redis可能会回应嵌套数组，但这也是完全支持的。
+	
+应使用freeReplyObject（）函数释放回复。 请注意，这个函数将负责释放包含在数组和嵌套数组中的子回复对象，所以用户不需要释放子回复（这实际上是有害的，会损坏内存）。
+
+**重要提示:hiredis（0.10.0）版本在使用异步API时会主动释放回复对象。 这意味着当你使用这个API时你不应该调用freeReplyObject。 在回调返回之后，回复对象被hiredis清除。 这种行为在未来的版本中可能会发生变化，因此请务必在升级时密切关注更新日志（请参阅问题＃39）。**
+
+###Cleaning up
+要断开和释放上下文，可以使用以下功能：
+```
+void redisFree(redisContext *c);
+```
+这个函数立即关闭套接字，然后释放创建上下文的分配。
+
+###Sending commands (cont'd)
+与redisCommand功能类似一起，函数redisCommandArgv也可用于发出命令。 它有以下原型：
+```
+void *redisCommandArgv(redisContext *c, int argc, const char **argv, const size_t *argvlen);
+```
+
+它需要参数的数量argc，一个字符串数组argv和参数数组argv的长度。 为了方便，argvlen可以设置为NULL，函数将在每个参数上使用strlen来确定它的长度。 显然，当任何参数需要binary-safe时，应提供整个参数数组的长度。
+
+返回值与redisCommand具有相同的语义。
+
+###Pipelining
+为了解释Hiredis如何支持阻塞连接中的流水线，需要了解内部执行流程。
+
+
